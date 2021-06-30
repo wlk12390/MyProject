@@ -1,3 +1,6 @@
+import re
+from numpy import *
+import numpy as np
 import time
 from tqdm import tqdm
 
@@ -28,6 +31,7 @@ SET TO TRUE TO USE ENGINE, FALSE TO USE GUI
 """
 useStkEngine = False
 Read_Scenario = False
+
 ############################################################################
 # Scenario Setup
 ############################################################################
@@ -65,8 +69,8 @@ if not Read_Scenario:
     stkRoot.NewScenario('StarLink')
 scenario = stkRoot.CurrentScenario
 scenario2 = scenario.QueryInterface(STKObjects.IAgScenario)
-# scenario2.StartTime = '24 Sep 2020 16:00:00.00'
-# scenario2.StopTime = '25 Sep 2020 16:00:00.00'
+#scenario2.StartTime = '24 Sep 2020 16:00:00.00'
+#scenario2.StopTime = '25 Sep 2020 16:00:00.00'
 
 totalTime = time.time() - startTime
 splitTime = time.time()
@@ -74,7 +78,7 @@ print("--- Scenario creation: {a:4.3f} sec\t\tTotal time: {b:4.3f} sec ---".form
 
 
 # 创建卫星星系
-def Creat_satellite(numOrbitPlanes=6, numSatsPerPlane=11, hight=550, Inclination=53, name='Sat'):
+def Creat_satellite(numOrbitPlanes, numSatsPerPlane, hight, Inclination=53, name=''):
     # Create constellation object
     constellation = scenario.Children.New(STKObjects.eConstellation, name)
     constellation2 = constellation.QueryInterface(STKObjects.IAgConstellation)
@@ -114,7 +118,6 @@ def Creat_satellite(numOrbitPlanes=6, numSatsPerPlane=11, hight=550, Inclination
             satellite2.Propagator.QueryInterface(STKObjects.IAgVePropagatorTwoBody).InitialState.Representation.Assign(
                 keplarian)
             satellite2.Propagator.QueryInterface(STKObjects.IAgVePropagatorTwoBody).Propagate()
-
             # Add to constellation object
             constellation2.Objects.AddObject(satellite)
 
@@ -159,43 +162,123 @@ def Get_sat_receiver(sat, GT=20, frequency=12):
     return receiver2
 
 
-# 计算传输链路
-def Compute_access(access):
-    access.ComputeAccess()
-    accessDP = access.DataProviders.Item('Link Information')
-    accessDP2 = accessDP.QueryInterface(STKObjects.IAgDataPrvTimeVar)
-    Elements = ["Time", 'Link Name', 'EIRP', 'Prop Loss', 'Rcvr Gain', "Xmtr Gain", "Eb/No", "BER"]
-    results = accessDP2.ExecElements(scenario2.StartTime, scenario2.StopTime, 3600, Elements)
-    Times = results.DataSets.GetDataSetByName('Time').GetValues()  # 时间
-    EbNo = results.DataSets.GetDataSetByName('Eb/No').GetValues()  # 码元能量
-    BER = results.DataSets.GetDataSetByName('BER').GetValues()  # 误码率
-    Link_Name = results.DataSets.GetDataSetByName('Link Name').GetValues()
-    Prop_Loss = results.DataSets.GetDataSetByName('Prop Loss').GetValues()
-    Xmtr_Gain = results.DataSets.GetDataSetByName('Xmtr Gain').GetValues()
-    EIRP = results.DataSets.GetDataSetByName('EIRP').GetValues()
-    # Range = results.DataSets.GetDataSetByName('Range').GetValues()
-    return Times, Link_Name, BER, EbNo, Prop_Loss, Xmtr_Gain, EIRP
+def Computing_All_Access():
+    # 计算场景中所有的链接
+    print('Clearing All Access')
+    stkRoot.ExecuteCommand('RemoveAllAccess /')
+    T = scenario2.StartTime
+    Temp = re.sub("\D", "", T)  # 时间戳
+    Temp = int(Temp) - 100000
+    tick = 0
+    link_t = np.zeros((12, 12))  # 链接矩阵,行从KPA0_0开始排列，列从KPB0_0开始排列
+    a1 = np.zeros((12,12,100))   #存放可见性开始时间
+    b1 = np.zeros((12,12,100))   #存放可见性结束时间
+    durationnum = np.zeros((12, 12)) #存放卫星间可见区间数量
+    #将一天分为1440段，步长一分钟
+    for t in range(0,1440):
+        Temp = int(Temp) + 100000
+        tick = tick + 1
+        if tick>=60:
+            tick = 0
+            Temp = int(Temp) + 400000
+        if int(Temp)==282021240000000:
+            Temp=292021000000000
+        number1 = -1  # 卫星对象标识
+    # 计算某个卫星与其他卫星的链路质量，并生成报告
+        if t==0:
+            for each_sat in tqdm(sat_list):
+                    number1 = number1 + 1
+                    number2 = -1  # 卫星对象标识
+                    for k in range(0, 2):
+                       for j in range(0,3):
+                         satellite = each_sat.QueryInterface(STKObjects.IAgSatellite)
+                         now_sat_name = each_sat.InstanceName
+                         now_plane_num = k
+                         now_sat_num = j
+                         number2 = 1 + number2
+                         now_sat_transmitter = each_sat.Children.GetElements(STKObjects.eTransmitter)[0]  # 找到该卫星的发射机
+                         Set_Transmitter_Parameter(now_sat_transmitter)  # , EIRP=20)
+                         s = 'KPA' + str(now_plane_num) + '_' + str(now_sat_num)
+                         #print(now_sat_name , s) #链接对象
+                         access = now_sat_transmitter.GetAccessToObject(
+                                Get_sat_receiver(sat_dic['KPA' + str(now_plane_num) + '_' + str(now_sat_num)]))
+                         #通过接口获得接入卫星数据
+                         access.ComputeAccess()
 
-access_list = scenario2.GetExistingAccesses() #获取所有的Access
-for access_path in tqdm(access_list):
-    # access_path:('Satellite/Sat0_0/Transmitter/Transmitter_Sat0_0','Satellite/Sat0_1/Receiver/Reciver_Sat0_1',True)
-    # access_path[0]:发射机地址
-    # access_path[1]：接收机地址
-    Transmitter_name = access_path[0].split('/')[-1]
-    Reciver_name = access_path[1].split('/')[-1]
-    access = scenario2.GetAccessBetweenObjectsByPath(access_path[0], access_path[1])
-    link = access
-    Transmitter_name = access_path[0].split('/')[-1]
-    Reciver_name = access_path[1].split('/')[-1]
-    access = scenario2.GetAccessBetweenObjectsByPath(access_path[0], access_path[1])
+                         accessIntervals = access.ComputedAccessIntervalTimes
+
+                         accessDataProvider = access.DataProviders.Item('Access Data')
+
+                         accessDataProvider2 = accessDataProvider.QueryInterface(STKObjects.IAgDataPrvInterval)
+
+                         dataProviderElements = ['Start Time', 'Stop Time']
+                         x = number1
+                         y = number2
+                         durationnum[x][y] = accessIntervals.Count
+                         for i in range(0, accessIntervals.Count):
+                             timesi = accessIntervals.GetInterval(i)
+                             #print(timesi)
+                             sxyi = list(timesi)
+                             a1[x][y][i] = re.sub("\D", "", sxyi[0])  # 正则表达式
+                             b1[x][y][i] = re.sub("\D", "", sxyi[1])
+                             if Temp >= int(a1[x][y][i]) and Temp <= int(b1[x][y][i]):
+                                 link_t[x, y] = 1
+                                 break
+                             #return a1xyi,b1xyi,durationnumxy
+
+                    for k in range(0, 2):
+                        for j in range(0, 3):
+                            now_sat_name = each_sat.InstanceName
+                            satellite = each_sat.QueryInterface(STKObjects.IAgSatellite)
+                            now_plane_num = k
+                            now_sat_num = j
+                            number2 = 1 + number2
+                            satellite = each_sat.QueryInterface(STKObjects.IAgSatellite)
+
+                            now_sat_transmitter = each_sat.Children.GetElements(STKObjects.eTransmitter)[0]  # 找到该卫星的发射机
+                            Set_Transmitter_Parameter(now_sat_transmitter)  # , EIRP=20)
+                            s1 = 'KPB' + str(now_plane_num) + '_' + str(now_sat_num)
+                            #print(now_sat_name , s1)
+                            access = now_sat_transmitter.GetAccessToObject(
+                                Get_sat_receiver(sat_dic['KPB' + str(now_plane_num) + '_' + str(now_sat_num)]))
+
+                            now_sat_num = now_sat_num + 1
+                            access.ComputeAccess()
+                            accessIntervals = access.ComputedAccessIntervalTimes
+
+                            accessDataProvider = access.DataProviders.Item('Access Data')
+
+                            accessDataProvider2 = accessDataProvider.QueryInterface(STKObjects.IAgDataPrvInterval)
+
+                            dataProviderElements = ['Start Time', 'Stop Time']
+                            x = number1
+                            y = number2
+                            durationnum[x][y] = accessIntervals.Count
+                            for i in range(0, accessIntervals.Count):
+                                timesi = accessIntervals.GetInterval(i)
+                                #print(timesi)
+                                sxyi = list(timesi)
+                                a1[x][y][i] = re.sub("\D", "", sxyi[0])  # 正则表达式
+                                b1[x][y][i] = re.sub("\D", "", sxyi[1])
+                                if Temp >= int(a1[x][y][i]) and Temp <= int(b1[x][y][i]):
+                                    link_t[x, y] = 1
+                                    break
+            print('第', t, '个链接矩阵')
+            print(link_t)
+        else:
+            for x in range(0, 12):
+                for y in range(0, 12):
+                    for i in range(0, int(durationnum[x][y])):
+                        if Temp >= int(a1[x][y][i]) and Temp <= int(b1[x][y][i]):
+                            link_t[x, y] = 1
+                            break
+            print('第', t, '个链接矩阵')
+            print(link_t)
 
 
 
-
-
-
+# 修改卫星及其轨道的颜色
 def Change_Sat_color(sat_list):
-    # 修改卫星及其轨道的颜色
     print('Changing Color of Satellite')
     for each_sat in tqdm(sat_list):
         now_sat_name = each_sat.InstanceName
@@ -227,34 +310,43 @@ def Change_Sat_color(sat_list):
         orbit.IsOrbitVisible = False  # 将轨道设置为不可见
 
 
-
 # 如果不是读取当前场景，即首次创建场景
 if not Read_Scenario:
-    Creat_satellite(numOrbitPlanes=6, numSatsPerPlane=11, hight=550, Inclination=53)  # Starlink
+    Creat_satellite(numOrbitPlanes=2, numSatsPerPlane=3, hight=750, Inclination=53, name='KPB')  # Starlink
+    Creat_satellite(numOrbitPlanes=2, numSatsPerPlane=3, hight=450, Inclination=53, name='KPA')
     # Kuiper
-    # Creat_satellite(numOrbitPlanes=34, numSatsPerPlane=34, hight=630, Inclination=51.9, name='KPA')  # Phase A
+    # Creat_satellite(numOrbitPlanes=34, numSatsPerPlane=34, hight=630, Inclination=51.9, nanow_sat_name = each_sat.InstanceNameme='KPA')  # Phase A
     # Creat_satellite(numOrbitPlanes=32, numSatsPerPlane=32, hight=610, Inclination=42, name='KPB')  # Phase B
     # Creat_satellite(numOrbitPlanes=28, numSatsPerPlane=28, hight=590, Inclination=33, name='KPC')  # Phase C
     sat_list = stkRoot.CurrentScenario.Children.GetElements(STKObjects.eSatellite)
+    sat_dic = {}
+    print('Creating Satellite Dictionary')
+    for sat in tqdm(sat_list):
+        sat_dic[sat.InstanceName] = sat
+    Plane_num = []
+    for i in range(0, 2):
+        Plane_num.append(i)
+    Sat_num = []
+    for i in range(0, 1):
+        Sat_num.append(i)
     Add_transmitter_receiver(sat_list)
-    #Creating_All_Access()
-    # IAgStkObjectRoot root: STK Object Model root
-    # IAgSatellite satellite: Satellite object
-    # IAgFacility facility: Facility object
+    Computing_All_Access()
+else:
+# 创建卫星的字典，方便根据名字对卫星进行查找
+    sat_list = stkRoot.CurrentScenario.Children.GetElements(STKObjects.eSatellite)
+    sat_dic = {}
+    print('Creating Satellite Dictionary')
+    for sat in tqdm(sat_list):
+       sat_dic[sat.InstanceName] = sat
+    Plane_num = []
+    for i in range(0, 2):
+       Plane_num.append(i)
+    Sat_num = []
+    for i in range(0, 1):
+       Sat_num.append(i)
+    Computing_All_Access()
+    access_list = stkRoot.CurrentScenario.Children.GetElements(STKObjects.eAccess)
 
-    # Change DateFormat dimension to epoch seconds to make the data easier to handle in
-    # Python
-    stkRoot.UnitPreferences.Item('DateFormat').SetCurrentUnit('EpSec')
-    # Get the current scenario
-    scenario = stkRoot.CurrentScenario
-    # Set up the access object
-    access = constellation2.GetAccessToObject()
-    access.ComputeAccess()
-    # Get the Access AER Data Provider
-    accessDP = access.DataProviders.Item('Access Data').Exec(scenario.StartTime, scenario.StopTime)
-
-    accessStartTimes = accessDP.DataSets.GetDataSetByName('Start Time').GetValues
-    accessStopTimes = accessDP.DataSets.GetDataSetByName('Stop Time').GetValues
 
 
 
